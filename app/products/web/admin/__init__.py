@@ -170,11 +170,13 @@ from .tokens import router as _tokens_router  # noqa: E402
 from .batch import router as _batch_router  # noqa: E402
 from .assets import router as _assets_router  # noqa: E402
 from .cache import router as _cache_router  # noqa: E402
+from .upstreams import router as _upstreams_router  # noqa: E402
 
 router.include_router(_tokens_router)
 router.include_router(_batch_router)
 router.include_router(_assets_router)
 router.include_router(_cache_router)
+router.include_router(_upstreams_router)
 
 
 # ---------------------------------------------------------------------------
@@ -214,8 +216,8 @@ async def admin_models():
 
 
 @router.post("/chat/completions", tags=[_TAG_ADMIN_SYSTEM])
-async def admin_chat_completions(req: ChatCompletionRequest):
-    return await chat_completions_endpoint(req)
+async def admin_chat_completions(req: ChatCompletionRequest, request: Request):
+    return await chat_completions_endpoint(req, request)
 
 
 @router.post("/images/generations", tags=[_TAG_ADMIN_SYSTEM])

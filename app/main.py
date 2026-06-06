@@ -153,6 +153,24 @@ async def lifespan(app: FastAPI):
     app.state.repository = repo
     app.state.directory = directory
 
+    from app.control.upstream.backends.factory import (
+        create_repository as create_upstream_repository,
+        describe_repository_target as describe_upstream_repository_target,
+    )
+    from app.dataplane.upstream import get_upstream_directory, set_upstream_directory
+
+    upstream_backend, upstream_target = describe_upstream_repository_target()
+    logger.info(
+        "upstream storage configured: backend={} target={}",
+        upstream_backend,
+        upstream_target,
+    )
+    upstream_repo = create_upstream_repository()
+    await upstream_repo.initialize()
+    upstream_directory = await get_upstream_directory(upstream_repo)
+    app.state.upstream_repository = upstream_repo
+    app.state.upstream_directory = upstream_directory
+
     # 3. Account directory sync loop — all workers, lightweight incremental pull.
     #    Keeps each worker's in-memory table eventually consistent with the repo.
     #
@@ -177,6 +195,8 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(interval)
             try:
                 changed = await directory.sync_if_changed()
+                upstream_changed = await upstream_directory.sync_if_changed()
+                changed = changed or upstream_changed
                 idle_streak = 0 if changed else min(idle_streak + 1, _SYNC_IDLE_AFTER)
             except asyncio.CancelledError:
                 raise
@@ -264,6 +284,8 @@ async def lifespan(app: FastAPI):
     set_refresh_scheduler(None)
     set_refresh_scheduler_leader(False)
     set_refresh_service(None)
+    set_upstream_directory(None)
+    await upstream_repo.close()
     await repo.close()
     logger.info("application shutdown completed")
 
@@ -316,6 +338,10 @@ def create_app() -> FastAPI:
         {
             "name": "Admin - Cache",
             "description": "Admin local cache management endpoints.",
+        },
+        {
+            "name": "Admin - Upstreams",
+            "description": "Admin upstream provider management endpoints.",
         },
         {
             "name": "WebUI - System",

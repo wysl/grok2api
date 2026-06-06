@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title data-i18n="upstreams.pageTitle">Grok2API - 数据源接入</title>
+  <link rel="icon" href="/favicon.ico?v={{APP_VERSION}}">
+  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
+  <link href="/static/css/app.css?v={{APP_VERSION}}" rel="stylesheet">
+  <style>
+    body { background:#FAF9F5 }
+    .page-hd { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:20px }
+    .page-title { font-size:22px; font-weight:700; line-height:1.2 }
+    .page-sub { font-size:13px; color:var(--fg-muted); margin-top:5px }
+    .page-actions { display:flex; gap:8px; align-items:center; flex-shrink:0 }
+    .page-action-btn { height:32px; padding:0 14px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center; gap:6px; font-size:13px; font-weight:600; border:1px solid #e6e6e6; background:#fafafa; color:#444 }
+    .page-action-btn:hover { background:#f3f3f3; border-color:#dcdcdc }
+    .page-action-btn-primary { background:#111; border-color:#111; color:#fff }
+    .page-action-btn-primary:hover { background:#222; border-color:#222 }
+    .page-action-btn:disabled { opacity:.45; pointer-events:none }
+    .stat-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:20px }
+    .stat-cell { min-height:88px; padding:14px 16px; border-radius:12px; background:#fff; display:flex; flex-direction:column; gap:12px }
+    .stat-top { display:flex; align-items:center; justify-content:space-between; gap:10px }
+    .stat-label { font-size:11px; color:#8a8a8a; letter-spacing:.01em; white-space:nowrap }
+    .stat-num { font-size:22px; font-weight:600; line-height:1; letter-spacing:-.02em; margin-top:auto }
+    .strategy-card { margin-bottom:20px; padding:14px 16px; border-radius:14px; background:#fff; display:flex; align-items:center; justify-content:space-between; gap:16px }
+    .strategy-title { font-size:12px; font-weight:700; color:#24211d }
+    .strategy-sub { margin-top:3px; font-size:12px; color:#8a8478 }
+    .strategy-pill { height:28px; padding:0 12px; border-radius:999px; display:inline-flex; align-items:center; background:#f1ece2; color:#6a6459; font-size:12px; font-weight:700; white-space:nowrap }
+    .section-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin:24px 0 14px }
+    .section-title { font-size:13px; font-weight:600; color:#222; letter-spacing:.01em }
+    .table-toolbar { display:flex; align-items:center; gap:8px; margin-bottom:8px; color:#8f8f8f; font-size:12px; font-weight:500 }
+    .table-toolbar-left { flex:1 }
+    .upstream-table-card { background:#fff; border-radius:14px; overflow-x:auto; overflow-y:hidden }
+    .upstream-table { width:max-content; min-width:100%; border-collapse:collapse }
+    .upstream-table th { background:#fff; font-size:11px; font-weight:500; color:#9b9b9b; padding:11px 16px; text-align:left; letter-spacing:.01em; white-space:nowrap }
+    .upstream-table td { font-size:13px; padding:13px 16px; border-bottom:none; vertical-align:middle; color:#3f3f3f }
+    .upstream-table tr:hover td { background:#fdfdfd }
+    .table-empty { text-align:center; color:#bbb; font-size:13px; padding:40px 16px }
+    .provider-name { display:grid; gap:3px; min-width:180px }
+    .provider-name strong { font-size:13px; color:#222 }
+    .provider-name small { font-size:11px; color:#999; font-family:'Geist Mono','Courier New',monospace }
+    .mono { font-family:'Geist Mono','Courier New',monospace; font-size:12px; word-break:break-all }
+    .muted { color:#999 }
+    .badge { display:inline-flex; align-items:center; height:22px; padding:0 8px; border-radius:999px; font-size:11px; font-weight:700; white-space:nowrap }
+    .badge-active { background:#ecfdf5; color:#059669 }
+    .badge-cooling { background:#fff7ed; color:#ea580c }
+    .badge-disabled { background:#f5f5f5; color:#666 }
+    .badge-error { background:#fef2f2; color:#dc2626 }
+    .badge-basic { background:#f5f5f5; color:#555 }
+    .row-actions { display:flex; align-items:center; gap:8px; flex-wrap:nowrap; white-space:nowrap }
+    .row-action { color:#929292; width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; flex:0 0 auto; border-radius:8px }
+    .row-action:hover { color:#333; background:#f5f5f5 }
+    .row-action-danger:hover { color:#dc2626; background:#fef2f2 }
+    .row-action:disabled { opacity:.35; pointer-events:none }
+    .row-action svg { width:14px; height:14px; stroke:currentColor; stroke-linecap:round; stroke-linejoin:round; fill:none }
+    .toggle { position:relative; display:inline-block; width:36px; height:20px; flex-shrink:0 }
+    .toggle input { opacity:0; width:0; height:0 }
+    .toggle-track { position:absolute; cursor:pointer; inset:0; background:#e5e5e5; border-radius:999px; transition:background .15s }
+    .toggle-track::before { content:''; position:absolute; width:16px; height:16px; left:2px; top:2px; background:#fff; border-radius:50%; transition:transform .15s; box-shadow:0 1px 3px rgba(0,0,0,.18) }
+    .toggle input:checked + .toggle-track { background:#111 }
+    .toggle input:checked + .toggle-track::before { transform:translateX(16px) }
+    .form-grid { display:grid; gap:12px }
+    .form-row { display:grid; gap:6px }
+    .form-row-inline { grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px }
+    .form-label { font-size:12px; font-weight:600; color:#333 }
+    .form-input, .form-select, .form-textarea { width:100%; border:1px solid #ececec; background:#fbfbfb; border-radius:9px; font-size:13px; padding:0 10px }
+    .form-input, .form-select { height:34px }
+    .form-textarea { min-height:76px; padding:9px 10px; resize:vertical; font-family:'Geist Mono','Courier New',monospace; line-height:1.45 }
+    .form-input:focus, .form-select:focus, .form-textarea:focus { border-color:#d7d7d7; background:#fff }
+    .form-hint { font-size:11px; color:#999 }
+    .upstream-modal { width:min(560px,92vw) }
+    .drawer-overlay { position:fixed; inset:0; background:rgba(0,0,0,.24); z-index:310; opacity:0; pointer-events:none; transition:opacity .2s; display:flex; justify-content:flex-end }
+    .drawer-overlay.open { opacity:1; pointer-events:auto }
+    .drawer { width:min(520px,92vw); height:100%; background:#fff; padding:22px; box-shadow:-20px 0 50px rgba(0,0,0,.12); transform:translateX(100%); transition:transform .2s; overflow:auto }
+    .drawer-overlay.open .drawer { transform:none }
+    .drawer-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:18px }
+    .drawer-title { font-size:16px; font-weight:700 }
+    .drawer-sub { margin-top:4px; font-size:12px; color:#888 }
+    .model-list { display:grid; gap:8px }
+    .model-item { padding:10px 12px; border-radius:12px; background:#fafafa; display:grid; grid-template-columns:minmax(0,1fr) 150px; gap:10px; align-items:center }
+    .model-name { min-width:0; font-family:'Geist Mono','Courier New',monospace; font-size:12px; word-break:break-all; color:#333 }
+    .model-type { height:30px; border:1px solid #ececec; border-radius:8px; padding:0 8px; background:#fff; font-size:12px }
+    @media (max-width: 760px) {
+      .page-hd, .strategy-card { flex-direction:column; align-items:stretch }
+      .stat-grid { grid-template-columns:repeat(2,minmax(0,1fr)) }
+      .form-row-inline { grid-template-columns:1fr }
+      .model-item { grid-template-columns:1fr }
+    }
+  </style>
+</head>
+<body>
+  <div id="admin-header" data-active="/admin/upstreams"></div>
+  <main class="admin-main">
+    <div class="page-hd">
+      <div>
+        <h1 class="page-title" data-i18n="upstreams.pageHeading">数据源接入</h1>
+        <p class="page-sub" data-i18n="upstreams.pageSubtitle">管理 OpenAI 兼容上游、权重和健康状态。</p>
+      </div>
+      <div class="page-actions">
+        <button class="page-action-btn" id="refresh-btn" type="button" data-i18n="upstreams.refresh">刷新</button>
+        <button class="page-action-btn page-action-btn-primary" id="add-btn" type="button" data-i18n="upstreams.addProvider">新增 Provider</button>
+      </div>
+    </div>
+
+    <section class="stat-grid" aria-label="Upstream overview">
+      <div class="stat-cell"><div class="stat-top"><span class="stat-label" data-i18n="upstreams.statTotal">Provider 总数</span></div><div class="stat-num" id="stat-total">0</div></div>
+      <div class="stat-cell"><div class="stat-top"><span class="stat-label" data-i18n="upstreams.statEnabled">已启用</span></div><div class="stat-num" id="stat-enabled">0</div></div>
+      <div class="stat-cell"><div class="stat-top"><span class="stat-label" data-i18n="upstreams.statActive">正常</span></div><div class="stat-num" id="stat-active">0</div></div>
+      <div class="stat-cell"><div class="stat-top"><span class="stat-label" data-i18n="upstreams.statModels">模型数</span></div><div class="stat-num" id="stat-models">0</div></div>
+    </section>
+
+    <section class="strategy-card">
+      <div>
+        <div class="strategy-title" data-i18n="upstreams.strategyTitle">路由策略</div>
+        <div class="strategy-sub" data-i18n="upstreams.strategySubtitle">当前模型路由会按该策略选择本地账号池或上游数据源。</div>
+      </div>
+      <span class="strategy-pill" id="strategy-pill">-</span>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <div class="section-title" data-i18n="upstreams.sectionProviders">Provider 列表</div>
+      </div>
+      <div class="table-toolbar">
+        <div class="table-toolbar-left" id="table-summary">-</div>
+      </div>
+      <div class="upstream-table-card">
+        <table class="upstream-table">
+          <thead>
+            <tr>
+              <th data-i18n="upstreams.colProvider">Provider</th>
+              <th data-i18n="upstreams.colType">类型</th>
+              <th data-i18n="upstreams.colBaseUrl">Base URL</th>
+              <th data-i18n="upstreams.colEnabled">启用</th>
+              <th data-i18n="upstreams.colPriorityWeight">优先级 / 权重</th>
+              <th data-i18n="upstreams.colStatus">状态</th>
+              <th data-i18n="upstreams.colModels">模型</th>
+              <th data-i18n="upstreams.colLastHealth">最近检测</th>
+              <th data-i18n="upstreams.colLastError">最近错误</th>
+              <th data-i18n="upstreams.colActions">操作</th>
+            </tr>
+          </thead>
+          <tbody id="provider-tbody">
+            <tr><td class="table-empty" colspan="10" data-i18n="upstreams.loading">正在加载…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div class="modal-overlay" id="provider-modal" aria-hidden="true">
+    <div class="modal upstream-modal" role="dialog" aria-modal="true" aria-labelledby="provider-modal-title">
+      <div class="modal-title" id="provider-modal-title" data-i18n="upstreams.addTitle">新增 Provider</div>
+      <form class="form-grid" id="provider-form">
+        <div class="form-row">
+          <label class="form-label" for="provider-name" data-i18n="upstreams.labelName">名称</label>
+          <input class="form-input" id="provider-name" name="name" required>
+        </div>
+        <div class="form-row form-row-inline">
+          <div class="form-row">
+            <label class="form-label" for="provider-type" data-i18n="upstreams.labelType">类型</label>
+            <select class="form-select" id="provider-type" name="provider_type">
+              <option value="openai_compatible">openai_compatible</option>
+              <option value="sub2api">sub2api</option>
+              <option value="new_api">new_api</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label class="form-label" for="provider-enabled" data-i18n="upstreams.labelEnabled">启用</label>
+            <label class="toggle"><input id="provider-enabled" name="enabled" type="checkbox" checked><span class="toggle-track"></span></label>
+          </div>
+        </div>
+        <div class="form-row">
+          <label class="form-label" for="provider-base-url" data-i18n="upstreams.labelBaseUrl">Base URL</label>
+          <input class="form-input" id="provider-base-url" name="base_url" placeholder="https://api.example.com" required>
+        </div>
+        <div class="form-row">
+          <label class="form-label" for="provider-api-key" data-i18n="upstreams.labelApiKey">API Key</label>
+          <input class="form-input" id="provider-api-key" name="api_key" autocomplete="new-password">
+          <div class="form-hint" id="api-key-hint" data-i18n="upstreams.apiKeyHintNew">保存后不回显明文。</div>
+        </div>
+        <div class="form-row form-row-inline">
+          <div class="form-row">
+            <label class="form-label" for="provider-priority" data-i18n="upstreams.labelPriority">优先级</label>
+            <input class="form-input" id="provider-priority" name="priority" type="number" step="1" value="0">
+          </div>
+          <div class="form-row">
+            <label class="form-label" for="provider-weight" data-i18n="upstreams.labelWeight">权重</label>
+            <input class="form-input" id="provider-weight" name="weight" type="number" step="1" min="0" value="1">
+          </div>
+        </div>
+        <div class="form-row">
+          <label class="form-label" for="provider-model-types" data-i18n="upstreams.labelModelTypes">模型能力标注 JSON</label>
+          <textarea class="form-textarea" id="provider-model-types" name="model_types" placeholder='{"grok-4":"chat"}'></textarea>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" type="button" id="provider-cancel" data-i18n="upstreams.cancel">取消</button>
+          <button class="btn btn-primary" type="submit" id="provider-save" data-i18n="upstreams.save">保存</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="drawer-overlay" id="model-drawer" aria-hidden="true">
+    <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="model-drawer-title">
+      <div class="drawer-head">
+        <div>
+          <div class="drawer-title" id="model-drawer-title" data-i18n="upstreams.modelsTitle">模型详情</div>
+          <div class="drawer-sub" id="model-drawer-sub">-</div>
+        </div>
+        <button class="row-action" id="model-drawer-close" type="button" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+      </div>
+      <div class="model-list" id="model-list"></div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" type="button" id="model-save" data-i18n="upstreams.saveModelTypes">保存能力标注</button>
+      </div>
+    </aside>
+  </div>
+
+  <script src="/static/js/i18n.js?v={{APP_VERSION}}"></script>
+  <script src="/static/js/auth.js?v={{APP_VERSION}}"></script>
+  <script src="/static/js/toast.js?v={{APP_VERSION}}"></script>
+  <script src="/static/js/admin-header.js?v={{APP_VERSION}}"></script>
+  <script src="/static/js/admin/upstreams.js?v={{APP_VERSION}}"></script>
+  <script src="/static/js/footer.js?v={{APP_VERSION}}"></script>
+</body>
+</html>

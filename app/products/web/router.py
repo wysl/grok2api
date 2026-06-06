@@ -58,6 +58,12 @@ async def admin_config():
 async def admin_cache():
     return _serve_html("admin/cache.html")
 
+
+@router.get("/admin/upstreams", include_in_schema=False)
+async def admin_upstreams():
+    return _serve_html("admin/upstreams.html")
+
+
 @router.get("/admin/images", include_in_schema=False)
 async def admin_images():
     return _serve_html("admin/images.html")

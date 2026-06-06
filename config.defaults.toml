@@ -127,6 +127,19 @@ on_demand_min_interval_sec = 300
 max_inflight = 8
 
 
+# ==================== 上游 OpenAI 兼容 Provider ====================
+[upstream]
+# /v1 路由选号策略：
+#   local_first    — 本地可用时优先本地，429/5xx 可 fallback 到上游
+#   upstream_first — 上游有对应模型时优先上游
+#   upstream_only  — 只使用上游 provider
+#   weighted       — 本地与上游按轮询权重混选，上游 provider 使用各自 weight
+strategy = "local_first"
+# weighted 策略下本地目标与整体上游目标的权重
+local_weight = 1
+weight = 1
+
+
 # ==================== 对话配置 ====================
 [chat]
 timeout = 60

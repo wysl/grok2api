@@ -3,6 +3,7 @@
 import base64
 import binascii
 import mimetypes
+from dataclasses import dataclass
 from typing import Annotated, AsyncGenerator, AsyncIterable, Literal
 
 import orjson
@@ -11,6 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 
 from app.control.account.state_machine import is_manageable
 from app.platform.auth.middleware import verify_api_key
+from app.platform.config.snapshot import get_config
 from app.platform.errors import AppError, RateLimitError, ValidationError
 from app.platform.logging.logger import logger
 from app.platform.storage import image_files_dir, video_files_dir
@@ -18,6 +20,7 @@ from app.control.model import registry as model_registry
 from app.control.model.spec import ModelSpec
 from app.control.model.enums import Capability
 from app.control.account.quota_defaults import supports_mode
+from app.dataplane.upstream import current_strategy
 from .schemas import (
     ChatCompletionRequest,
     ImageGenerationRequest,
@@ -35,6 +38,13 @@ _TAG_RESPONSES = "OpenAI - Responses"
 _TAG_IMAGES = "OpenAI - Images"
 _TAG_VIDEOS = "OpenAI - Videos"
 _TAG_FILES = "OpenAI - Files"
+_LOCAL_FALLBACK_STATUSES = {429, 500, 502, 503, 504}
+
+
+@dataclass(slots=True, frozen=True)
+class _TargetResolution:
+    target: Literal["local", "upstream"]
+    spec: ModelSpec | None
 
 
 async def _available_pools(request: Request) -> frozenset[str]:
@@ -57,6 +67,77 @@ def _model_available_for_pools(spec: ModelSpec, pools: frozenset[str]) -> bool:
     return False
 
 
+async def _is_local_model_available(request: Request, spec: ModelSpec | None) -> bool:
+    if spec is None or not spec.enabled:
+        return False
+    pools = await _available_pools(request)
+    return _model_available_for_pools(spec, pools)
+
+
+def _upstream_directory(request: Request):
+    return getattr(request.app.state, "upstream_directory", None)
+
+
+def _has_upstream_model(request: Request, model_name: str) -> bool:
+    directory = _upstream_directory(request)
+    return bool(directory is not None and directory.has_model(model_name))
+
+
+_WEIGHTED_LOCAL_COUNTER = 0
+
+
+async def _resolve_target(
+    request: Request,
+    model_name: str,
+) -> _TargetResolution:
+    """Resolve local/upstream target for a model and configured strategy."""
+    spec = model_registry.get(model_name)
+    local_available = await _is_local_model_available(request, spec)
+    upstream_available = _has_upstream_model(request, model_name)
+    strategy = current_strategy()
+
+    if strategy == "upstream_only":
+        if upstream_available:
+            return _TargetResolution("upstream", spec)
+        if spec is None or not spec.enabled:
+            raise ValidationError(
+                f"Model {model_name!r} does not exist or you do not have access to it.",
+                param="model",
+                code="model_not_found",
+            )
+        _raise_model_not_available(model_name)
+
+    if not local_available and upstream_available:
+        return _TargetResolution("upstream", spec)
+    if local_available and not upstream_available:
+        return _TargetResolution("local", spec)
+    if local_available and upstream_available:
+        if strategy == "upstream_first":
+            return _TargetResolution("upstream", spec)
+        if strategy == "weighted":
+            global _WEIGHTED_LOCAL_COUNTER
+            local_weight = max(1, get_config().get_int("upstream.local_weight", 1))
+            upstream_weight = max(1, get_config().get_int("upstream.weight", 1))
+            span = local_weight + upstream_weight
+            pick = _WEIGHTED_LOCAL_COUNTER % span
+            _WEIGHTED_LOCAL_COUNTER += 1
+            if pick >= local_weight:
+                return _TargetResolution("upstream", spec)
+        return _TargetResolution("local", spec)
+
+    if spec is None or not spec.enabled:
+        raise ValidationError(
+            f"Model {model_name!r} does not exist or you do not have access to it.",
+            param="model",
+            code="model_not_found",
+        )
+    _raise_model_not_available(model_name)
+
+
+def _should_fallback_to_upstream(exc: AppError, request: Request, model_name: str) -> bool:
+    return exc.status in _LOCAL_FALLBACK_STATUSES and _has_upstream_model(request, model_name)
+
+
 # ---------------------------------------------------------------------------
 # /v1/models
 # ---------------------------------------------------------------------------
@@ -77,18 +158,34 @@ async def list_models(request: Request):
     import time
 
     pools = await _available_pools(request)
-    models = [
-        {
+    now = int(time.time())
+    models_by_id: dict[str, dict] = {}
+    for m in model_registry.list_enabled():
+        if not _model_available_for_pools(m, pools):
+            continue
+        models_by_id[m.model_name] = {
             "id": m.model_name,
             "object": "model",
-            "created": int(time.time()),
+            "created": now,
             "owned_by": "xai",
             "name": m.public_name,
             "type": _CAPABILITY_TO_TYPE.get(int(m.capability), "chat"),
         }
-        for m in model_registry.list_enabled()
-        if _model_available_for_pools(m, pools)
-    ]
+    directory = _upstream_directory(request)
+    if directory is not None:
+        for model_id in directory.models():
+            models_by_id.setdefault(
+                model_id,
+                {
+                    "id": model_id,
+                    "object": "model",
+                    "created": now,
+                    "owned_by": "upstream",
+                    "name": model_id,
+                    "type": "chat",
+                },
+            )
+    models = list(models_by_id.values())
     return JSONResponse({"object": "list", "data": models})
 
 
@@ -99,8 +196,29 @@ async def get_model_endpoint(model_id: str, request: Request):
     import time
 
     spec = model_registry.get(model_id)
-    pools = await _available_pools(request)
-    if spec is None or not _model_available_for_pools(spec, pools):
+    if spec is not None and await _is_local_model_available(request, spec):
+        return JSONResponse(
+            {
+                "id": spec.model_name,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "xai",
+                "name": spec.public_name,
+                "type": _CAPABILITY_TO_TYPE.get(int(spec.capability), "chat"),
+            }
+        )
+    if _has_upstream_model(request, model_id):
+        return JSONResponse(
+            {
+                "id": model_id,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "upstream",
+                "name": model_id,
+                "type": "chat",
+            }
+        )
+    if spec is None or not await _is_local_model_available(request, spec):
         return JSONResponse(
             {
                 "error": {
@@ -110,16 +228,7 @@ async def get_model_endpoint(model_id: str, request: Request):
             },
             status_code=404,
         )
-    return JSONResponse(
-        {
-            "id": spec.model_name,
-            "object": "model",
-            "created": int(time.time()),
-            "owned_by": "xai",
-            "name": spec.public_name,
-            "type": _CAPABILITY_TO_TYPE.get(int(spec.capability), "chat"),
-        }
-    )
+    raise AssertionError("unreachable model resolution branch")
 
 
 # ---------------------------------------------------------------------------
@@ -182,16 +291,17 @@ async def _ensure_model_available(request: Request, spec: ModelSpec) -> None:
         _raise_model_not_available(spec.model_name)
 
 
-def _validate_chat(req: ChatCompletionRequest) -> None:
+def _validate_chat(req: ChatCompletionRequest, *, validate_model: bool = True) -> None:
     from app.platform.errors import ValidationError
 
-    spec = model_registry.get(req.model)
-    if spec is None or not spec.enabled:
-        raise ValidationError(
-            f"Model {req.model!r} does not exist or you do not have access to it.",
-            param="model",
-            code="model_not_found",
-        )
+    if validate_model:
+        spec = model_registry.get(req.model)
+        if spec is None or not spec.enabled:
+            raise ValidationError(
+                f"Model {req.model!r} does not exist or you do not have access to it.",
+                param="model",
+                code="model_not_found",
+            )
     if not req.messages:
         raise ValidationError("messages cannot be empty", param="messages")
     for i, msg in enumerate(req.messages):
@@ -332,19 +442,12 @@ async def _upload_to_data_uri(upload: UploadFile, *, param: str) -> str:
     return f"data:{mime};base64,{blob_b64}"
 
 
-@router.post(
-    "/chat/completions", tags=[_TAG_CHAT], dependencies=[Depends(verify_api_key)]
-)
-async def chat_completions_endpoint(req: ChatCompletionRequest):
-    _validate_chat(req)
-    from app.platform.config.snapshot import get_config
-
-    cfg = get_config()
-    is_stream = (
-        req.stream if req.stream is not None else cfg.get_bool("features.stream", True)
-    )
-
-    spec = model_registry.get(req.model)
+async def _dispatch_local_chat(
+    req: ChatCompletionRequest,
+    spec: ModelSpec | None,
+    *,
+    is_stream: bool,
+):
     if spec is None:
         raise ValidationError(
             f"Model {req.model!r} does not exist or you do not have access to it.",
@@ -353,91 +456,173 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
         )
     messages = [m.model_dump(exclude_none=True) for m in req.messages]
 
-    try:
-        # Dispatch by model capability.
-        if spec.is_image_edit():
-            from .images import edit as img_edit
+    if spec.is_image_edit():
+        from .images import edit as img_edit
 
-            cfg = req.image_config or ImageConfig()
-            _validate_image_edit_n(cfg.n or 1, param="image_config.n")
-            result = await img_edit(
-                model=req.model,
-                messages=messages,
-                n=cfg.n or 1,
-                size=cfg.size or "1024x1024",
-                response_format=cfg.response_format or "url",
-                stream=is_stream,
-                chat_format=True,
-            )
+        cfg = req.image_config or ImageConfig()
+        _validate_image_edit_n(cfg.n or 1, param="image_config.n")
+        result = await img_edit(
+            model=req.model,
+            messages=messages,
+            n=cfg.n or 1,
+            size=cfg.size or "1024x1024",
+            response_format=cfg.response_format or "url",
+            stream=is_stream,
+            chat_format=True,
+        )
 
-        elif spec.is_image():
-            from .images import generate as img_gen
+    elif spec.is_image():
+        from .images import generate as img_gen
 
-            cfg = req.image_config or ImageConfig()
-            size = cfg.size or "1024x1024"
-            aspect_ratio = cfg.aspect_ratio
-            fmt = cfg.response_format or "url"
-            n = cfg.n or 1
-            _validate_image_n(req.model, n, param="image_config.n")
-            _validate_image_shape(size, aspect_ratio, param_prefix="image_config.")
-            # Extract prompt from last user message.
-            prompt = next(
-                (
-                    m.content
-                    for m in reversed(req.messages)
-                    if m.role == "user"
-                    and isinstance(m.content, str)
-                    and m.content.strip()
-                ),
-                "",
-            )
-            result = await img_gen(
-                model=req.model,
-                prompt=prompt or "",
-                n=n,
-                size=size,
-                aspect_ratio=aspect_ratio,
-                response_format=fmt,
-                stream=is_stream,
-                chat_format=True,
-            )
+        cfg = req.image_config or ImageConfig()
+        size = cfg.size or "1024x1024"
+        aspect_ratio = cfg.aspect_ratio
+        fmt = cfg.response_format or "url"
+        n = cfg.n or 1
+        _validate_image_n(req.model, n, param="image_config.n")
+        _validate_image_shape(size, aspect_ratio, param_prefix="image_config.")
+        prompt = next(
+            (
+                m.content
+                for m in reversed(req.messages)
+                if m.role == "user"
+                and isinstance(m.content, str)
+                and m.content.strip()
+            ),
+            "",
+        )
+        result = await img_gen(
+            model=req.model,
+            prompt=prompt or "",
+            n=n,
+            size=size,
+            aspect_ratio=aspect_ratio,
+            response_format=fmt,
+            stream=is_stream,
+            chat_format=True,
+        )
 
-        elif spec.is_video():
-            from .video import completions as vid_comp
+    elif spec.is_video():
+        from .video import completions as vid_comp
+        from .video import validate_video_length as _validate_video_length
 
-            vcfg = req.video_config or VideoConfig()
-            from .video import validate_video_length as _validate_video_length
+        vcfg = req.video_config or VideoConfig()
+        _validate_video_length(vcfg.seconds or 6)
+        result = await vid_comp(
+            model=req.model,
+            messages=messages,
+            stream=is_stream,
+            seconds=vcfg.seconds or 6,
+            size=vcfg.size or "720x1280",
+            resolution_name=vcfg.resolution_name,
+            preset=vcfg.preset,
+        )
 
-            _validate_video_length(vcfg.seconds or 6)
-            result = await vid_comp(
-                model=req.model,
-                messages=messages,
-                stream=is_stream,
-                seconds=vcfg.seconds or 6,
-                size=vcfg.size or "720x1280",
-                resolution_name=vcfg.resolution_name,
-                preset=vcfg.preset,
-            )
-
+    else:
+        if req.reasoning_effort is None:
+            emit_think: bool | None = None
         else:
-            # reasoning_effort=None → config default; "none" → off; otherwise → on.
-            if req.reasoning_effort is None:
-                emit_think: bool | None = None
-            else:
-                emit_think = req.reasoning_effort != "none"
-            result = await chat_completions(
-                model=req.model,
-                messages=messages,
-                stream=is_stream,
-                emit_think=emit_think,
-                tools=req.tools,
-                tool_choice=req.tool_choice,
-                temperature=req.temperature or 0.8,
-                top_p=req.top_p or 0.95,
-            )
+            emit_think = req.reasoning_effort != "none"
+        result = await chat_completions(
+            model=req.model,
+            messages=messages,
+            stream=is_stream,
+            emit_think=emit_think,
+            tools=req.tools,
+            tool_choice=req.tool_choice,
+            temperature=req.temperature or 0.8,
+            top_p=req.top_p or 0.95,
+        )
+    return result
 
-    except AppError:
-        raise
+
+def _release_upstream_stream(request: Request, stream, lease):
+    async def _wrapped():
+        directory = _upstream_directory(request)
+        try:
+            async for chunk in stream:
+                yield chunk
+        finally:
+            if directory is not None:
+                await directory.release(lease)
+
+    return _wrapped()
+
+
+async def _upstream_chat_with_release(
+    request: Request,
+    req: ChatCompletionRequest,
+    *,
+    is_stream: bool,
+):
+    from app.dataplane.upstream.forwarder import forward_json, forward_stream
+
+    directory = _upstream_directory(request)
+    if directory is None:
+        raise RateLimitError("Upstream directory not initialised")
+    lease = await directory.reserve(req.model)
+    if lease is None:
+        raise RateLimitError("No available upstream provider for this model")
+    payload = req.model_dump(exclude_none=True)
+    payload["stream"] = is_stream
+    if is_stream:
+        return _release_upstream_stream(
+            request,
+            forward_stream(lease, "chat/completions", payload),
+            lease,
+        )
+    try:
+        return await forward_json(lease, "chat/completions", payload)
+    finally:
+        await directory.release(lease)
+
+
+async def _fallback_stream_on_initial_error(
+    request: Request,
+    req: ChatCompletionRequest,
+    stream,
+    *,
+    is_stream: bool,
+):
+    started = False
+    try:
+        async for chunk in stream:
+            started = True
+            yield chunk
+    except AppError as exc:
+        if started or not _should_fallback_to_upstream(exc, request, req.model):
+            raise
+        fallback = await _upstream_chat_with_release(request, req, is_stream=is_stream)
+        async for chunk in fallback:
+            yield chunk
+
+
+@router.post(
+    "/chat/completions", tags=[_TAG_CHAT], dependencies=[Depends(verify_api_key)]
+)
+async def chat_completions_endpoint(req: ChatCompletionRequest, request: Request):
+    cfg = get_config()
+    is_stream = (
+        req.stream if req.stream is not None else cfg.get_bool("features.stream", True)
+    )
+    resolution = await _resolve_target(request, req.model)
+    _validate_chat(req, validate_model=resolution.target == "local")
+
+    if resolution.target == "upstream":
+        result = await _upstream_chat_with_release(request, req, is_stream=is_stream)
+        if isinstance(result, dict):
+            return JSONResponse(result)
+        return StreamingResponse(
+            _safe_sse(result), media_type="text/event-stream", headers=_SSE_HEADERS
+        )
+
+    try:
+        result = await _dispatch_local_chat(req, resolution.spec, is_stream=is_stream)
+    except AppError as exc:
+        if _should_fallback_to_upstream(exc, request, req.model):
+            result = await _upstream_chat_with_release(request, req, is_stream=is_stream)
+        else:
+            raise
     except Exception as exc:
         logger.exception(
             "chat completions endpoint failed: model={} stream={} error={}",
@@ -464,6 +649,13 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
 
     if isinstance(result, dict):
         return JSONResponse(result)
+    if _has_upstream_model(request, req.model):
+        result = _fallback_stream_on_initial_error(
+            request,
+            req,
+            result,
+            is_stream=is_stream,
+        )
     return StreamingResponse(
         _safe_sse(result), media_type="text/event-stream", headers=_SSE_HEADERS
     )
