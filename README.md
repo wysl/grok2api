@@ -22,6 +22,7 @@ Grok2API 是一个基于 **FastAPI** 构建的 Grok 网关，支持将 Grok Web 
 - 支持本地缓存图片、视频与本地代理链接返回
 - 支持文生图、图像编辑、文生视频、图生视频
 - 内置 Admin 后台管理、Web Chat、Masonry 生图、ChatKit 语音页面
+- 支持上游 Provider 接入（OpenAI 兼容 / Sub2API / New API），可将本地不可用模型透明转发到上游，并支持多种路由策略（local_first / upstream_first / upstream_only / weighted）
 
 <br>
 
@@ -160,6 +161,7 @@ docker compose up -d --build
 | 配置管理 | `/admin/config` |
 | 缓存管理 | `/admin/cache` |
 | 生图 | `/admin/images` |
+| 数据源接入 | `/admin/upstreams` |
 | WebUI 登录页（兼容跳转） | `/webui/login` → `/admin/login` |
 | Web Chat | `/webui/chat` |
 | Images（兼容跳转） | `/webui/images` → `/admin/images` |
@@ -233,6 +235,7 @@ docker compose up -d --build
 | `video` | `timeout` |
 | `voice` | `timeout` |
 | `asset` | `upload_timeout`, `download_timeout`, `list_timeout`, `delete_timeout` |
+| `upstream` | `strategy`, `local_weight`, `weight` |
 | `nsfw` | `timeout` |
 | `batch` | `nsfw_concurrency`, `refresh_concurrency`, `asset_upload_concurrency`, `asset_list_concurrency`, `asset_delete_concurrency` |
 
@@ -243,6 +246,45 @@ docker compose up -d --build
 | `features.image_format` | `grok_url`, `local_url`, `grok_md`, `local_md`, `base64` |
 | `features.imagine_public_image_proxy` | `true`, `false` |
 | `features.video_format` | `grok_url`, `local_url`, `grok_html`, `local_html` |
+
+<br>
+
+## 上游 Provider 接入
+
+支持接入外部 OpenAI 兼容 API 作为上游数据源，本地不可用的模型会自动转发到上游。
+
+### 管理方式
+
+- **Admin 后台**：访问 `/admin/upstreams`，可视化管理上游 Provider（新增 / 编辑 / 删除 / 测试连接 / 刷新模型）
+- **Admin API**：`/admin/api/upstreams`，支持 CRUD、测试连接、刷新模型列表
+
+### 配置项（`config.defaults.toml`）
+
+```toml
+[upstream]
+# 路由策略：local_first | upstream_first | upstream_only | weighted
+strategy = "local_first"
+# weighted 策略下的权重
+local_weight = 1
+weight = 1
+```
+
+### 路由策略说明
+
+| 策略 | 行为 |
+| :-- | :-- |
+| `local_first` | 本地可用时优先本地，429/5xx 自动 fallback 到上游（默认） |
+| `upstream_first` | 上游有对应模型时优先上游 |
+| `upstream_only` | 只使用上游 Provider |
+| `weighted` | 本地与上游按权重轮询 |
+
+### 支持的上游类型
+
+| 类型 | 说明 |
+| :-- | :-- |
+| `openai_compatible` | 任何 OpenAI 兼容 API（如 OpenAI、DeepSeek、Claude via proxy 等） |
+| `sub2api` | Sub2API 实例 |
+| `new_api` | New API 实例 |
 
 <br>
 
