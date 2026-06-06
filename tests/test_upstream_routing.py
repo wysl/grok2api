@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,8 @@ from app.products.openai.router import (
     list_models,
 )
 from app.products.openai.schemas import ChatCompletionRequest, MessageItem
+from app.products.web.admin.upstreams import upstream_models
+from app.products.web.webui.chat import webui_chat_completions
 
 
 class _AccountRepo:
@@ -91,6 +94,36 @@ class UpstreamRoutingTests(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_admin_upstream_models_merges_local_and_upstream_metadata(self):
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = LocalUpstreamProviderRepository(Path(tmp) / "upstreams.db")
+                await repo.initialize()
+                await repo.upsert_provider(
+                    UpstreamUpsert(
+                        name="compat",
+                        base_url="https://example.test",
+                        api_key="sk-test",
+                        models=["grok-4.20-fast", "grok-upstream-live", "gpt-test"],
+                    )
+                )
+                directory = UpstreamDirectory(repo)
+                await directory.bootstrap()
+                response = await upstream_models(_request(upstream_directory=directory))
+                payload = json.loads(response.body)
+                models = payload["models"]
+                ids = [item["id"] for item in models]
+                self.assertEqual(ids.count("grok-4.20-fast"), 1)
+                self.assertIn("grok-upstream-live", ids)
+                self.assertEqual(payload["data"], models)
+                sources = {item["id"]: item["source"] for item in models}
+                types = {item["id"]: item["type"] for item in models}
+                self.assertEqual(types["grok-upstream-live"], "chat")
+                self.assertEqual(sources["grok-4.20-fast"], "local")
+                self.assertEqual(sources["grok-upstream-live"], "upstream")
+
+        asyncio.run(_run())
+
     def test_upstream_only_model_routes_to_forwarder(self):
         async def _run():
             with tempfile.TemporaryDirectory() as tmp:
@@ -130,6 +163,40 @@ class UpstreamRoutingTests(unittest.TestCase):
                 self.assertEqual(args[1], "chat/completions")
                 self.assertEqual(args[2]["model"], "gpt-test")
                 self.assertFalse(args[2]["stream"])
+
+        asyncio.run(_run())
+
+    def test_webui_chat_endpoint_preserves_request_for_upstream_routing(self):
+        async def _run():
+            with tempfile.TemporaryDirectory() as tmp:
+                repo = LocalUpstreamProviderRepository(Path(tmp) / "upstreams.db")
+                await repo.initialize()
+                await repo.upsert_provider(
+                    UpstreamUpsert(
+                        name="compat",
+                        base_url="https://example.test",
+                        api_key="sk-test",
+                        models=["grok-upstream-live"],
+                    )
+                )
+                directory = UpstreamDirectory(repo)
+                await directory.bootstrap()
+                req = ChatCompletionRequest(
+                    model="grok-upstream-live",
+                    messages=[MessageItem(role="user", content="hello")],
+                    stream=False,
+                )
+                with patch(
+                    "app.dataplane.upstream.forwarder.forward_json",
+                    new=AsyncMock(return_value={"id": "chatcmpl_webui"}),
+                ) as forward_json:
+                    response = await webui_chat_completions(
+                        req,
+                        _request(upstream_directory=directory),
+                    )
+                self.assertIsInstance(response, JSONResponse)
+                self.assertTrue(forward_json.await_count)
+                self.assertEqual(forward_json.await_args.args[2]["model"], "grok-upstream-live")
 
         asyncio.run(_run())
 

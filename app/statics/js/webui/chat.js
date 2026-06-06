@@ -2,12 +2,11 @@
   const isAdminPage = window.location.pathname.startsWith('/admin');
   const isEmbedded = new URLSearchParams(window.location.search).get('embed') === '1';
   const VERIFY_ENDPOINT = isAdminPage ? `${ADMIN_API}/verify` : '/webui/api/verify';
-  const MODELS_ENDPOINT = isAdminPage ? `${ADMIN_API}/models` : '/webui/api/models';
+  const MODELS_ENDPOINT = isAdminPage ? `${ADMIN_API}/upstreams/models` : '/webui/api/models';
   const CHAT_ENDPOINT = isAdminPage ? `${ADMIN_API}/chat/completions` : '/webui/api/chat/completions';
   const keyStore = isAdminPage ? adminKey : webuiKey;
   const loginPath = isAdminPage ? '/admin/login' : '/webui/login';
   const storeScope = isAdminPage ? 'admin' : 'webui';
-  const PREFERRED_MODEL = 'grok-4.20-0309-non-reasoning';
   const STORE_KEY = `grok2api_${storeScope}_chat_sessions_v1`;
   const SIDEBAR_STORE_KEY = `grok2api_${storeScope}_sidebar_collapsed_v1`;
 
@@ -19,6 +18,7 @@
   const statusEl = document.getElementById('status');
   const promptInput = document.getElementById('promptInput');
   const sendBtn = document.getElementById('sendBtn');
+  const refreshModelsBtn = document.getElementById('refreshModelsBtn');
   const newChatBtn = document.getElementById('newChatBtn');
   const sidebarToggleBtn = document.getElementById('sidebarToggleBtn');
   const sessionList = document.getElementById('sessionList');
@@ -67,6 +67,18 @@
       .filter(Boolean)
       .map((part) => part ? part.charAt(0).toUpperCase() + part.slice(1) : part)
       .join(' ');
+  }
+
+  function selectedModelId() {
+    return modelSelect && modelSelect.value ? modelSelect.value : '';
+  }
+
+  function fallbackModelId() {
+    return (availableModels[0] && availableModels[0].id) || '';
+  }
+
+  function defaultModelId() {
+    return selectedModelId() || fallbackModelId();
   }
 
   function currentSystemPrompt() {
@@ -658,7 +670,7 @@
       id: `chat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       title: text('webui.chat.untitled', 'New Chat'),
       titleLocked: false,
-      model: modelSelect.value || PREFERRED_MODEL,
+      model: defaultModelId(),
       system: '',
       messages: [],
       updatedAt: Date.now(),
@@ -670,7 +682,7 @@
       id: item && item.id ? String(item.id) : `chat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       title: item && item.title ? String(item.title) : text('webui.chat.untitled', 'New Chat'),
       titleLocked: Boolean(item && item.titleLocked),
-      model: item && item.model ? String(item.model) : PREFERRED_MODEL,
+      model: item && item.model ? String(item.model) : fallbackModelId(),
       system: item && item.system ? String(item.system) : '',
       messages: Array.isArray(item && item.messages)
         ? item.messages
@@ -780,6 +792,7 @@
     sending = next;
     promptInput.disabled = next;
     modelSelect.disabled = next;
+    if (refreshModelsBtn) refreshModelsBtn.disabled = next;
     if (systemInput) systemInput.disabled = next;
     renderSendButton();
   }
@@ -979,7 +992,7 @@
     pendingFiles = activeEdit ? activeEdit.files.slice() : extractEditablePendingFiles(content);
     messages = messages.slice(0, messageIndex);
     session.messages = messages;
-    session.model = modelSelect.value || PREFERRED_MODEL;
+    session.model = defaultModelId();
     session.system = currentSystemPrompt();
     if (!session.titleLocked) session.title = createSessionTitle(session.messages);
     session.updatedAt = Date.now();
@@ -1341,7 +1354,7 @@
   function syncCurrentSession() {
     const session = getCurrentSession();
     if (!session) return;
-    session.model = modelSelect.value || PREFERRED_MODEL;
+    session.model = defaultModelId();
     session.system = currentSystemPrompt();
     if (!session.titleLocked) session.title = createSessionTitle(session.messages);
     session.updatedAt = Date.now();
@@ -1360,7 +1373,7 @@
     if (modelSelect.options.length) {
       modelSelect.value = Array.from(modelSelect.options).some((option) => option.value === session.model)
         ? session.model
-        : (modelSelect.value || PREFERRED_MODEL);
+        : defaultModelId();
     }
     renderUploadMeta();
     renderSessionList();
@@ -1440,7 +1453,7 @@
       .filter((message) => message && (message.role === 'user' || message.role === 'assistant'))
       .forEach((message) => outgoing.push(message));
     return {
-      model: modelSelect.value || PREFERRED_MODEL,
+      model: defaultModelId(),
       messages: outgoing,
       stream: true,
       temperature: 0.8,
@@ -1448,28 +1461,65 @@
     };
   }
 
-  async function loadModels() {
-    const headers = await getAuthHeaders();
-    const res = await fetch(MODELS_ENDPOINT, { headers, cache: 'no-store' });
-    if (!res.ok) throw new Error(`models ${res.status}`);
+  function normalizeModelEntry(item) {
+    if (!item) return null;
+    if (typeof item === 'string') return { id: item, name: item, type: 'chat', capability: 'chat' };
+    const id = String(item.id || item.model || item.name || '').trim();
+    if (!id) return null;
+    const type = String(item.type || item.capability || 'chat').trim().toLowerCase();
+    return {
+      ...item,
+      id,
+      name: item.name || id,
+      type,
+      capability: type,
+    };
+  }
 
-    const data = await res.json();
-    const items = Array.isArray(data && data.data) ? data.data : [];
-    const capability = requestedCapability();
-    availableModels = items.filter((item) => item && item.id);
-    const visibleModels = capability
-      ? availableModels.filter((item) => item.capability === capability)
-      : availableModels;
-    const ids = visibleModels.map((item) => item && item.id).filter(Boolean);
+  function isVisibleModel(item, capability) {
+    if (!item || !item.id) return false;
+    if (!item.id.toLowerCase().startsWith('grok')) return false;
+    return (item.type || item.capability || 'chat') === capability;
+  }
 
-    modelSelect.innerHTML = '';
-    visibleModels.forEach((item) => {
-      const opt = document.createElement('option');
-      opt.value = item.id;
-      opt.textContent = formatModelOptionLabel(item.id, item.name || item.id);
-      modelSelect.appendChild(opt);
-    });
-    modelSelect.value = ids.includes(PREFERRED_MODEL) ? PREFERRED_MODEL : (ids[0] || PREFERRED_MODEL);
+  function setModelRefreshState(refreshing) {
+    if (!refreshModelsBtn) return;
+    refreshModelsBtn.disabled = sending || refreshing;
+    refreshModelsBtn.classList.toggle('is-loading', refreshing);
+  }
+
+  async function loadModels({ preserveSelection = false, notify = false } = {}) {
+    const previousValue = preserveSelection ? selectedModelId() : '';
+    setModelRefreshState(true);
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(MODELS_ENDPOINT, { headers, cache: 'no-store' });
+      if (!res.ok) throw new Error(`models ${res.status}`);
+
+      const data = await res.json();
+      const rawItems = Array.isArray(data && data.models)
+        ? data.models
+        : (Array.isArray(data && data.data) ? data.data : []);
+      const capability = requestedCapability() || 'chat';
+      availableModels = rawItems
+        .map(normalizeModelEntry)
+        .filter((item) => isVisibleModel(item, capability));
+      const visibleModels = availableModels;
+      const ids = visibleModels.map((item) => item && item.id).filter(Boolean);
+
+      modelSelect.innerHTML = '';
+      visibleModels.forEach((item) => {
+        const opt = document.createElement('option');
+        opt.value = item.id;
+        opt.textContent = formatModelOptionLabel(item.id, item.name || item.id);
+        modelSelect.appendChild(opt);
+      });
+      modelSelect.value = ids.includes(previousValue) ? previousValue : (ids[0] || '');
+      if (notify) toast(text('webui.chat.modelsRefreshed', 'Models refreshed'), 'info');
+      if (getCurrentSession()) syncCurrentSession();
+    } finally {
+      setModelRefreshState(false);
+    }
   }
 
   async function sendMessage() {
@@ -1479,6 +1529,10 @@
     const capability = currentModelCapability();
     if (!prompt) {
       toast(text('webui.chat.errors.enterPrompt', 'Please enter a message'), 'error');
+      return;
+    }
+    if (!defaultModelId()) {
+      toast(text('webui.chat.errors.noModels', 'No chat models available'), 'error');
       return;
     }
 
@@ -1494,7 +1548,7 @@
       return;
     }
 
-    session.model = modelSelect.value || PREFERRED_MODEL;
+    session.model = defaultModelId();
     session.system = currentSystemPrompt();
     messages.push(userMessage);
     if (!session.titleLocked) session.title = createSessionTitle(messages);
@@ -1692,6 +1746,13 @@
       return;
     }
     sendMessage();
+  });
+  refreshModelsBtn?.addEventListener('click', async () => {
+    try {
+      await loadModels({ preserveSelection: true, notify: true });
+    } catch (error) {
+      toast(text('webui.chat.errors.modelsFailed', 'Failed to refresh models'), 'error');
+    }
   });
   modelSelect.addEventListener('change', syncCurrentSession);
   systemInput?.addEventListener('change', syncCurrentSession);

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from app.control.model import registry as model_registry
 from app.control.upstream.commands import ListUpstreamsQuery, UpstreamPatch, UpstreamUpsert
 from app.control.upstream.models import UpstreamStatus, UpstreamType
 from app.dataplane.upstream.forwarder import fetch_models
@@ -69,6 +70,28 @@ def _serialize_provider(record) -> dict:
 
 def _json(data) -> Response:
     return Response(content=orjson.dumps(data), media_type="application/json")
+
+
+def _local_model_type(spec) -> str:
+    if spec.is_image_edit():
+        return "image_edit"
+    if spec.is_image():
+        return "image"
+    if spec.is_video():
+        return "video"
+    if spec.is_voice():
+        return "voice"
+    return "chat"
+
+
+def _model_entry(model_id: str, *, model_type: str, source: str, name: str | None = None) -> dict:
+    return {
+        "id": model_id,
+        "object": "model",
+        "name": name or model_id,
+        "type": model_type,
+        "source": source,
+    }
 
 
 async def _sync_directory(request: Request) -> None:
@@ -191,12 +214,30 @@ async def refresh_upstream_models(
 
 @router.get("/upstreams/models")
 async def upstream_models(request: Request):
+    await _sync_directory(request)
     directory = getattr(request.app.state, "upstream_directory", None)
-    models = directory.models() if directory is not None else []
+    models_by_id: dict[str, dict] = {}
+    for spec in model_registry.list_enabled():
+        models_by_id[spec.model_name] = _model_entry(
+            spec.model_name,
+            model_type=_local_model_type(spec),
+            source="local",
+            name=spec.public_name,
+        )
+
+    upstream_model_ids = directory.models() if directory is not None else []
+    for model_id in upstream_model_ids:
+        models_by_id.setdefault(
+            model_id,
+            _model_entry(model_id, model_type="chat", source="upstream"),
+        )
+
+    models = list(models_by_id.values())
     return _json(
         {
             "object": "list",
-            "data": [{"id": model, "object": "model"} for model in models],
+            "models": models,
+            "data": models,
         }
     )
 

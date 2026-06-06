@@ -721,6 +721,15 @@ button{cursor:pointer}
   box-shadow:none;
   border:0;
 }
+.webui-refresh-models-btn{
+  width:32px;height:32px;border-radius:999px;color:#4b463f;display:grid;place-items:center;flex:0 0 auto
+}
+.webui-refresh-models-btn:hover{background:rgba(0,0,0,.05);color:#1f1c18}
+.webui-refresh-models-btn:disabled{opacity:.45;cursor:default}
+.webui-refresh-models-btn svg{width:17px;height:17px}
+.webui-refresh-models-btn path{stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.webui-refresh-models-btn.is-loading svg{animation:webui-refresh-models-spin .8s linear infinite}
+@keyframes webui-refresh-models-spin{to{transform:rotate(360deg)}}
 .webui-textarea{
   height:36px;min-height:36px;max-height:none;padding:8px 0 !important;margin:0;display:block;align-self:center;overflow:hidden;resize:none !important;
   border-radius:0 !important;border:0 !important;background:transparent !important;line-height:20px;font-size:14px;color:#20201e

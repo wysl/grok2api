@@ -1,8 +1,6 @@
 """WebUI chat API routes."""
 
-import time
-
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from app.control.model import registry as model_registry
@@ -14,35 +12,57 @@ from app.products.openai.schemas import ChatCompletionRequest, ImageGenerationRe
 router = APIRouter(prefix="/webui/api", dependencies=[Depends(verify_webui_key)], tags=["WebUI - Chat"])
 
 
-def _capability_name(spec) -> str:
+def _model_type(spec) -> str:
     if spec.is_image_edit():
         return "image_edit"
     if spec.is_image():
         return "image"
     if spec.is_video():
         return "video"
+    if spec.is_voice():
+        return "voice"
     return "chat"
 
 
+def _model_entry(model_id: str, *, model_type: str, source: str, name: str | None = None) -> dict:
+    return {
+        "id": model_id,
+        "object": "model",
+        "name": name or model_id,
+        "type": model_type,
+        "source": source,
+    }
+
+
 @router.get("/models")
-async def list_webui_models():
-    models = [
-        {
-            "id": spec.model_name,
-            "object": "model",
-            "created": int(time.time()),
-            "owned_by": "xai",
-            "name": spec.public_name,
-            "capability": _capability_name(spec),
-        }
-        for spec in model_registry.list_enabled()
-    ]
-    return JSONResponse({"object": "list", "data": models})
+async def list_webui_models(request: Request):
+    directory = getattr(request.app.state, "upstream_directory", None)
+    if directory is not None:
+        await directory.sync_if_changed()
+
+    models_by_id: dict[str, dict] = {}
+    for spec in model_registry.list_enabled():
+        models_by_id[spec.model_name] = _model_entry(
+            spec.model_name,
+            model_type=_model_type(spec),
+            source="local",
+            name=spec.public_name,
+        )
+
+    upstream_model_ids = directory.models() if directory is not None else []
+    for model_id in upstream_model_ids:
+        models_by_id.setdefault(
+            model_id,
+            _model_entry(model_id, model_type="chat", source="upstream"),
+        )
+
+    models = list(models_by_id.values())
+    return JSONResponse({"object": "list", "models": models, "data": models})
 
 
 @router.post("/chat/completions")
-async def webui_chat_completions(req: ChatCompletionRequest):
-    return await chat_completions_endpoint(req)
+async def webui_chat_completions(req: ChatCompletionRequest, request: Request):
+    return await chat_completions_endpoint(req, request)
 
 
 @router.post("/images/generations")
